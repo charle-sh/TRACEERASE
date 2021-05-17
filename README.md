@@ -10,7 +10,7 @@ TRACEERASE has two modes, individual and automated. Individual allows you to spe
 
 ### Custom Log Viewer
 
-Full disclosure, I can't take full credit for this (or even most of it), I pulled a lot of code from [tdryer's excellent curses-based text editor](https://github.com/tdryer/editor). There are a number of changes, however, since the intended usage is much different. The <kbd>&#8593;</kbd> and <kbd>&#8595;</kbd> arrow keys are used for cursor movement, along with <kbd>PgUp</kbd> and <kbd>PgDn</kbd> (home and end will be implemented eventually). The <kbd>SPACEBAR</kbd> is used to select or unselect lines. Selected lines are highlighted.
+Full disclosure, I can't take full credit for this (or even most of it), I pulled a lot of code from [tdryer's excellent curses-based text editor](https://github.com/tdryer/editor). There are a number of changes, however, since the intended usage is much different. The <kbd>&#8593;</kbd> and <kbd>&#8595;</kbd> arrow keys are used for cursor movement, along with <kbd>PgUp</kbd> and <kbd>PgDn</kbd> (<kbd>Home</kbd> and <kbd>End</kbd> will be implemented eventually as well). The <kbd>SPACEBAR</kbd> is used to select or unselect lines. Selected lines are highlighted.
 
 ![](img/select_mode.PNG)*Select Mode*
 
