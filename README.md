@@ -36,7 +36,7 @@ Need to write.
 
 The `debugfs` tool, usually installed on ext2-4 filesystems, can manipulate the ctime stored in the inode table. From what I've seen in testing, you shouldn't attempt this if the file is opened by another process; it seems you can't flush the cached inode table (which is the ctime you see in the `stat` command) and update it with the value placed in the inode table by `debugfs` if a process has a handle on the file.
 
-Fortunately, there isn't much of a need to edit the ctime for most log files. ctime will update anytime the mtime changes, so if a log is written to frequently, the ctime will change when the next entry is added, removing your IOC. The only scenario where changing the ctime might be worth the risk is with logs that are rarely written to, like the btmp log. In that case, the reward might outway the risks, otherwise, probably not.
+Fortunately, there isn't much need to edit the ctime for most log files. ctime will update anytime the mtime changes, so if a log is written to frequently, the ctime will change when the next entry is added, removing your IOC. The only scenario where changing the ctime might be worth the risk is with logs that are rarely written to, like the btmp log. In that case, the reward might outway the risks, otherwise, probably not.
 
 ## How Logs are Read
 
