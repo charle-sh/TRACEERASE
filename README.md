@@ -4,21 +4,39 @@ TRACEERASE is a tool designed to clean various Unix logs. As of now, it can clea
 ## Background
 I originally started writing this as a way to get into more advanced Python scripting and to learn more about Unix logging. I noticed that most other scripts on GitHub and elsewhere either cleaned any instance of an IP address or username from a log, or wiped the log entirely. The latter is obviously easy to implement, but also easy to catch (what stands out more to sysadmins and cybersecurity analysts than empty logs??). The former was a bit harder to write, but also seemed to be too heavy-handed for something as surgical as log tampering. What if you're using stolen credentials to log in as a legitimate user through SSH? Maybe you fat-fingered the password once and ended up in the btmp log, but the admin who's creds you stole forgets his password every couple days. He's created more entries in the btmp log than you have. The goal of log tampering is to restore the logs to the same state they were in before you interacted with the system, but wiping all instances of that user is cleaning a mess you didn't make, and creating a log state that didn't previously exist. TRACEERASE avoids this by allowing the user to clean individual lines from logs, making sure you remove your IOCs, and nothing else.
 
-## How it works
+## How It Works
 
-TRACEERASE has two modes, individual and automated. Individual allows you to specify an individual file you would like to clean. Automated will determine the OS and then use branching logic to find logs on the system that can be cleaned (this mode is still under development). Once a log file is identified, it will be opened in the log viewer for viewing and dirty line selection,  and then automatically cleaned and timestomped.
+TRACEERASE has two modes, individual and automated. Individual allows you to specify an individual file you would like to clean. Automated will determine the OS and then use branching logic to find logs on the system that can be cleaned (this mode is still under development). Once a log file is identified, a hash will be made and its contents read into memory (either line by line or by chunks), displayed in the log viewer for viewing and dirty line selection, and then automatically cleaned and timestomped.
 
 ### Custom Log Viewer
 
 Full disclosure, I can't take full credit for this (or even most of it), I pulled a lot of code from [tdryer's excellent curses-based text editor](https://github.com/tdryer/editor). There are a number of changes, however, since the intended usage is much different. The <kbd>&#8593;</kbd> and <kbd>&#8595;</kbd> arrow keys are used for cursor movement, along with <kbd>PgUp</kbd> and <kbd>PgDn</kbd> (home and end will be implemented eventually). The <kbd>SPACEBAR</kbd> is used to select or unselect lines. Selected lines are highlighted.
 
-![](img/select_mode.png)*Select Mode*
+![](img/select_mode.PNG)*Select Mode*
 
 <kbd>Q</kbd> will quit without saving your selections:
 ![](img/quit_without_saving.png)*Quitting*
 
 <kbd>ENTER</kbd> will save your selections for cleaning.
 ![](img/save_selections.png)*Saving*
+
+The selections will then be presented to the user for final approval. The user can choose to reopen the log if selections need to change, or choose to proceed and clean the specified lines.
+
+### Automatic Cleaning
+
+Once the lines are selected, they'll be removed from the in-memory version of the file. A new hash will be made of the original log file and compared with the one taken at the start of the script to determine if any new entries have been made while you were using the tool (for active machines, this is very likely). If there are any changes, the tool will automatically append the new lines to the end of your "clean" version and then overwrite the original log.
+
+### Smart Timestamp Manipulation
+
+#### atime/mtime Manipulation
+
+Need to write.
+
+#### ctime Manipulation
+
+The `debugfs` tool, usually installed on ext2-4 filesystems, can manipulate the ctime stored in the inode table. From what I've seen in testing, you shouldn't attempt this if the file is opened by another process; it seems you can't flush the cached inode table (which is the ctime you see in the `stat` command) and update it with the value placed in the inode table by `debugfs` if a process has a handle on the file.
+
+## How Logs are Read
 
 ### utmp Binary Logs
 
@@ -51,10 +69,6 @@ struct utmp {
 '''
 STRUCT = struct.Struct('hi32s4s32s256shhiii4i20s')
 ```
-
-## ctime Manipulation
-
-The `debugfs` tool, usually installed on ext2-4 filesystems, can manipulate the ctime stored in the inode table. From what I've seen in testing, you shouldn't attempt this if the file is opened by another process; it seems you can't flush the cached inode table (which is the ctime you see in the `stat` command) with the value placed there by `debugfs` if a process has a handle on the file.
 
 ## Meme
 For those who read the whole README, here's a meme:
