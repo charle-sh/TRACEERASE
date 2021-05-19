@@ -8,15 +8,15 @@ from collections import namedtuple
 try:
     #Text styling
     from colorama import Fore, Style
-    success = Style.BRIGHT+Fore.GREEN+'[+]'+Style.RESET_ALL
-    status = Style.BRIGHT+Fore.BLUE+'[*]'+Style.RESET_ALL
-    bad = Style.BRIGHT+Fore.RED+'[-]'+Style.RESET_ALL
-    fail = Style.BRIGHT+Fore.RED+'[!]'+Style.RESET_ALL
+    success = Style.BRIGHT+Fore.GREEN+'[+] '+Style.RESET_ALL
+    status = Style.BRIGHT+Fore.BLUE+'[*] '+Style.RESET_ALL
+    bad = Style.BRIGHT+Fore.RED+'[-] '+Style.RESET_ALL
+    fail = Style.BRIGHT+Fore.RED+'[!] '+Style.RESET_ALL
 except ImportError:
-    success = '[+]'
-    status = '[*]'
-    bad = '[-]'
-    fail = '[!]'
+    success = '[+] '
+    status = '[*] '
+    bad = '[-] '
+    fail = '[!] '
 
 #CLI arguments
 parser = argparse.ArgumentParser()
@@ -28,9 +28,14 @@ parser.add_argument('-f', '--file', help=
 args = parser.parse_args()
 
 #Constants
-UTMP_STRUCT = struct.Struct('hi32s4s32s256shhiii4i20s') #utmp binary file struct
-UTMP_FILES = ['/var/log/wtmp','/var/log/btmp','/var/share/adm/wtmpx','/var/share/adm/btmpx']
+UTMP_STRUCT = struct.Struct('hi32s4s32s256shhiii4i20s') #utmp struct
+UTMPX_STRUCT = struct.Struct('32s4s32sih6xiii20x2x16s20x222x') #utmpx struct, big-endian
+#UTMPX_STRUCT = struct.Struct('32s4s32siHHHbbIII5IH257sb') #utmpx struct
+LASTLOG_STRUCT = struct.Struct('hh32s256s') #lastlog struct
+UTMP_FILES = ['/var/log/wtmp','/var/log/btmp']
+UTMPX_FILES = ['/var/share/adm/wtmpx','/var/share/adm/btmpx']
 BLOCKSIZE = 65536
+UTMPX_RECORD_SIZE = 372
 
 #Global variables
 auto = args.auto
@@ -270,7 +275,6 @@ class UtmpFile:
         self.fstype = None
         self.lines = []
         self.dirty_lines = []
-        self._will_exit = False
 
         #Get line size
         if self._size % 382 == 0:
@@ -282,12 +286,12 @@ class UtmpFile:
             self._hash = get_hash(self.path, self._line_size)
             self._main()
         else:
-            print(fail,self.path,'is empty')
+            print(fail+self.path+' is empty')
             sleep(1)
 
     def _main(self):
         self._make_list()
-        print(status+'Opening'+self.path+'...')
+        print(status+'Opening '+self.path+'...')
         sleep(1.5)
         curses.wrapper(Screen, self)
         if self._select() == 1:
@@ -300,8 +304,9 @@ class UtmpFile:
             else:
                 wiper(self.path)
         elif self._select() == None:
-            print(bad,self.path,'has not been changed because no dirty lines were selected!')
-
+            print(bad+self.path+' has not been changed because no dirty lines were selected!')
+        sleep(0.5)
+        print(success+'All actions on '+self.path+' completed.')
 
     def _make_list(self):
         #Get binary
@@ -324,19 +329,19 @@ class UtmpFile:
             bad_list = {i: l for i, l in enumerate(self.lines) if i in sorted(self.dirty_lines)}
             #Show lines to be removed
             sleep(1)
-            print(status,'The following lines will be removed:\n')
+            print(status+'The following lines will be removed:\n')
             for key in bad_list:
                 print(key, bad_list[key])
             while True:
-                a = input('\n',status,'Do you want to continue? (y/n) ')
+                a = input('\n'+status+'Do you want to continue? (y/n) ')
                 if a == 'y':
                     return 1
                 elif a == 'n':
-                    print(status,'Reopening file...')
+                    print(status+'Reopening file...')
                     sleep(1)
                     break
                 else:
-                    print(fail,'Invalid option!')
+                    print(fail+'Invalid option!')
             #Reopen file
             curses.wrapper(Screen, self)
             self._select()
@@ -344,15 +349,15 @@ class UtmpFile:
             return
 
     def _clean(self):
-        print(status,'Creating cleaned log file...')
+        print(status+'Creating cleaned log file...')
         #List comprehension to remove user specified lines from log file
         self.clean_binary = [l for i, l in enumerate(self._binary) if i not in self.dirty_lines]
         #Check if log has new entries since script started
         if self._hash != get_hash(self.path, self._line_size):
             sleep(1)
-            print(fail,self.path,'has changed since this script started!')
+            print(fail+self.path+' has changed since this script started!')
             sleep(0.5)
-            print(status,'Automatically adding new entries to cleaned log...')
+            print(status+'Automatically adding new entries to cleaned log...')
             with open(self.path, 'rb') as f:
                 f.seek(self._size, 1)
                 for line in f:
@@ -361,7 +366,7 @@ class UtmpFile:
             for line in self.clean_binary:
                 f.write(line)
         sleep(1)
-        print(success,self.path,'is cleaned')
+        print(success,+self.path+' is cleaned')
         sleep(1)
 
     def _get_mtime(self):
@@ -396,6 +401,153 @@ class UtmpRecord(namedtuple('utmprecord','type pid line id user host exit0 exit1
     def mtime_ns(self):
         return str(self.sec) + str(self.usec)
 
+class UtmpxFile:
+    def __init__(self, path):
+        self.path = path
+        self._size = os.path.getsize(self.path)
+        self.atime_ns = os.stat(self.path).st_atime_ns
+        self.mtime_ns = None
+        self._hash = None
+        self.fs = None
+        self.fstype = None
+        self.lines = []
+        self.dirty_lines = []
+
+        if self._size != 0:
+            self._hash = get_hash(self.path, UTMPX_RECORD_SIZE)
+            self._main()
+        else:
+            print(fail+self.path+' is empty')
+            sleep(1)
+
+    def _main(self):
+        self._make_list()
+        print(status+'Opening '+self.path+'...')
+        sleep(1.5)
+        curses.wrapper(Screen, self)
+        
+        if self._select() == 1:
+            if self._size / UTMPX_RECORD_SIZE != len(self.dirty_lines):
+                self._clean()
+                self._get_mtime()
+                touchback_am(self)
+                get_fstype(self)
+                touchback_c(self)
+            else:
+                wiper(self.path)
+        elif self._select() == None:
+            print(bad+self.path+' has not been changed because no dirty lines were selected!')
+        sleep(0.5)
+        print(success+'All actions on '+self.path+' completed.')
+
+    def _make_list(self):
+        #Get binary
+        self._binary = []
+        with open(self.path, 'rb') as f:
+            buf = f.read(UTMPX_RECORD_SIZE)
+            while buf:
+                self._binary.append(buf)
+                buf = f.read(UTMPX_RECORD_SIZE)
+        #Get strings version for pager
+        with open(self.path, 'rb') as f:
+            buf = f.read()
+            for i, entry in enumerate(self._read(buf)):
+                line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)+'    '+entry.type
+                self.lines.append(line)
+
+    def _select(self):
+        if self.dirty_lines != []:
+            self.clean_list = [l for i, l in enumerate(self.lines) if i not in sorted(self.dirty_lines)]
+            bad_list = {i: l for i, l in enumerate(self.lines) if i in sorted(self.dirty_lines)}
+            #Show lines to be removed
+            sleep(1)
+            print(status+'The following lines will be removed:\n')
+            for key in bad_list:
+                print(key, bad_list[key])
+            while True:
+                a = input('\n'+status+'Do you want to continue? (y/n) ')
+                if a == 'y':
+                    return 1
+                elif a == 'n':
+                    print(status+'Reopening file...')
+                    sleep(1)
+                    break
+                else:
+                    print(fail+'Invalid option!')
+            #Reopen file
+            curses.wrapper(Screen, self)
+            self._select()
+        else:
+            return
+
+    def _clean(self):
+        print(status+'Creating cleaned log file...')
+        #List comprehension to remove user specified lines from log file
+        self.clean_binary = [l for i, l in enumerate(self._binary) if i not in self.dirty_lines]
+        #Check if log has new entries since script started
+        if self._hash != get_hash(self.path, UTMPX_RECORD_SIZE):
+            sleep(1)
+            print(fail+self.path+' has changed since this script started!')
+            sleep(0.5)
+            print(status+'Automatically adding new entries to cleaned log...')
+            with open(self.path, 'rb') as f:
+                f.seek(self._size, 1)
+                for line in f:
+                    self.clean_binary.append(line)
+        with open(self.path, 'wb') as f:
+            for line in self.clean_binary:
+                f.write(line)
+        sleep(1)
+        print(success+self.path+' is cleaned')
+        sleep(1)
+
+    def _get_mtime(self):
+        offset = 0
+        with open(self.path, 'rb') as f:
+            f.seek((UTMPX_RECORD_SIZE * -1), 2)
+            buf = f.read()
+            last_line = UtmpxRecord._make(map(self._convert_string, UTMPX_STRUCT.unpack_from(buf, offset)))
+        self.mtime_ns = last_line.mtime_ns
+        while len(self.mtime_ns) < 19:
+            rand = random.randint(0,9)
+            self.mtime_ns += str(rand)
+
+    def _read(self, buf):
+        offset = 0
+        while offset < len(buf):
+            yield UtmpxRecord._make(map(self._convert_string, UTMPX_STRUCT.unpack_from(buf, offset)))
+            offset += UTMPX_STRUCT.size
+
+    def _convert_string(self, val):
+        if isinstance(val, bytes):
+            return val.rstrip(b'\0').decode()
+        return val
+
+class UtmpxRecord(namedtuple('utmpxrecord','user id line pid ut_type sec usec session host')):
+    #Convert epoch time to normal datetime
+    @property
+    def time(self):
+        return datetime.fromtimestamp(self.sec) + timedelta(microseconds=self.usec)
+
+    @property
+    def type(self):
+        return {
+          0: 'EMPTY',
+          1: 'RUN_LVL',
+          2: 'BOOT_TIME',
+          3: 'NEW_TIME',
+          4: 'OLD_TIME',
+          5: 'INIT_PROCESS',
+          6: 'LOGIN_PROCESS',
+          7: 'USER_PROCESS',
+          8: 'DEAD_PROCESS',
+          9: 'ACCOUNTING'
+        }.get(self.ut_type, 'UNKNOWN')
+    
+    @property
+    def mtime_ns(self):
+        return str(self.sec) + str(self.usec)
+
 class AsciiFile:
     #Just need the file path to start
     def __init__(self, path):
@@ -413,12 +565,12 @@ class AsciiFile:
             self._hash = get_hash(self.path, BLOCKSIZE)
             self._main()
         else:
-            print(fail,self.path,'is empty')
+            print(fail+self.path+' is empty')
             sleep(1)
 
     def _main(self):
         self._make_list()
-        print(status,'Opening',self.path,'...')
+        print(status+'Opening'+self.path+'...')
         sleep(1.5)
         curses.wrapper(Screen, self)
 
@@ -432,7 +584,9 @@ class AsciiFile:
             else:
                 wiper(self.path)
         elif self._select() == None:
-            print(bad,self.path,'has not been changed because no dirty lines were selected!')
+            print(bad+self.path+' has not been changed because no dirty lines were selected!')
+        sleep(0.5)
+        print(success+'All actions on '+self.path+' completed.')
 
     def _make_list(self):
         text = ''
@@ -446,19 +600,19 @@ class AsciiFile:
             bad_list = {i: l for i, l in enumerate(self.lines) if i in sorted(self.dirty_lines)}
             #Show lines to be removed
             sleep(1)
-            print(status,'The following lines will be removed:\n')
+            print(status+'The following lines will be removed:\n')
             for key in bad_list:
                 print(key, bad_list[key])
             while True:
-                a = input('\n',status,'Do you want to continue? (y/n) ')
+                a = input('\n'+status+'Do you want to continue? (y/n) ')
                 if a == 'y':
                     return 1
                 elif a == 'n':
-                    print(status,'Reopening file...')
+                    print(status+'Reopening file...')
                     sleep(1)
                     break
                 else:
-                    print(fail,'Invalid option!')
+                    print(fail+'Invalid option!')
             #Reopen file
             curses.wrapper(Screen, self)
             self._select()
@@ -466,13 +620,13 @@ class AsciiFile:
             return
 
     def _clean(self):
-        print(status,'Creating cleaned log file...')
+        print(status+'Creating cleaned log file...')
         #Check if log has new entries since script started
         if self._hash != get_hash(self.path, BLOCKSIZE):
             sleep(1)
-            print(fail,self.path,'has changed since this script started!')
+            print(fail+self.path+' has changed since this script started!')
             sleep(0.5)
-            print(status,'Automatically adding new entries to cleaned log...')
+            print(status+'Automatically adding new entries to cleaned log...')
             with open(self.path, 'rb') as f:
                 f.seek(self._size, 1)
                 for line in f:
@@ -480,7 +634,7 @@ class AsciiFile:
         with open(self.path, 'w') as f:
             f.write('\n'.join(self.clean_list)+'\n') #needs \n to not write next entry on same line
         sleep(1)
-        print(success,self.path,'is cleaned')
+        print(success+self.path+' is cleaned')
         sleep(1)
 
     def _get_mtime(self):
@@ -508,69 +662,66 @@ def logo():
     ''')
 
 def get_os():
-    print(status,'Getting OS information...')
+    print(status+'Getting OS information...')
     sleep(1)
     while True:
-        answer = input(status,'System reports itself as',platform.system(),
-            'is that correct? (y/n) ')
+        answer = input(status+'System reports itself as '+platform.system()+
+            ' is that correct? (y/n) ')
         if answer == 'y':
             system_os = platform.system()
             break
         elif answer == 'n':
             while True:
-                answer2 = input('Is this system Linux (1) or Solaris (2)? (1/2) ')
+                answer2 = input('Is this system Linux (1) or SunOS (2)? (1/2) ')
                 if answer2 == '1':
                     system_os = 'Linux'
                     break
                 elif answer2 == '2':
-                    system_os = 'Solaris'
+                    system_os = 'SunOS'
                     break
                 else:
-                    print(fail,answer2,'is not a valid option!')
+                    print(fail+answer2+' is not a valid option!')
                     continue
             break
         else:
-            print(fail,answer,'is not a valid option!')
+            print(fail+answer+' is not a valid option!')
             continue
     return system_os
 
-def get_log_paths(system_os):
-    if system_os == 'Linux':
+def get_linux_logs():
+    btmp_path = '/var/log/btmp'
+    wtmp_path = '/var/log/wtmp'
+    auth_path = '/var/log/auth.log'
+    syslog_path = '/var/log/syslog'
+    if os.path.isfile(btmp_path):
         btmp_path = '/var/log/btmp'
-        wtmp_path = '/var/log/wtmp'
-        auth_log_path = '/var/log/auth.log'
-        syslog_path = '/var/log/syslog'
-        if os.path.isfile(btmp_path):
-            btmp_path = '/var/log/btmp'
-        else:
-            print('that did not go well')
-        if os.path.isfile(wtmp_path):
-            wtmp_path = '/var/log/wtmp'
-        else:
-            print('that did not go well')
-        if os.path.isfile(auth_log_path):
-            auth_log_path = '/var/log/auth.log'
-        else:
-            print('that did not go well')
-        if os.path.isfile(syslog_path):
-            syslog_path = '/var/log/syslog'
-        else:
-            print('that did not go well')
-    elif system_os == 'Solaris':
-        btmp_path = '/var/adm/btmpx'
-        wtmp_path = '/var/adm/wtmpx'
-        if os.path.isfile(btmp_path):
-            btmp_path = '/var/adm/btmpx'
-        else:
-            print('that did not go well')
-        if os.path.isfile(wtmp_path):
-            wtmp_path = '/var/adm/wtmpx'
-        else:
-            print('that did not go well')
     else:
-        print(fail,system_os,'is unsupported!')
-        exit()
-    return btmp_path, wtmp_path, auth_log_path, syslog_path
+        print('that did not go well')
+    if os.path.isfile(wtmp_path):
+        wtmp_path = '/var/log/wtmp'
+    else:
+        print('that did not go well')
+    if os.path.isfile(auth_path):
+        auth_path = '/var/log/auth.log'
+    else:
+        print('that did not go well')
+    if os.path.isfile(syslog_path):
+        syslog_path = '/var/log/syslog'
+    else:
+        print('that did not go well')
+    return btmp_path, wtmp_path, auth_path, syslog_path
+
+def get_sunos_logs():
+    btmpx_path = '/var/share/adm/btmpx'
+    wtmpx_path = '/var/share/adm/wtmpx'
+    if os.path.isfile(btmpx_path):
+        btmpx_path = '/var/share/adm/btmpx'
+    else:
+        print('that did not go well')
+    if os.path.isfile(wtmpx_path):
+        wtmpx_path = '/var/share/adm/wtmpx'
+    else:
+        print('that did not go well')
 
 def get_file_type(path):
     op = subprocess.Popen(['file', path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -583,7 +734,7 @@ def get_file_type(path):
     elif 'empty' in str(stdout):
         return 'empty'
     else:
-        print(fail,'Cannot clean this file!')
+        print(fail+'Cannot clean this file!')
         return
 
 def get_hash(path, block_size):
@@ -597,18 +748,18 @@ def get_hash(path, block_size):
     return hasher.hexdigest()
 
 def wiper(log):
-        print(status,'/dev/null\'ing',log,'...')
+        print(status+'/dev/null\'ing '+log+'...')
         sleep(1)
         command = 'cat /dev/null > '+log
         dev_null = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(success,log,'is cleaned')
+        print(success+log+' is cleaned')
 
 def touchback_am(log):
     #Gotta find latest remaining entry to the log to change the mtime back to that point
-    print(status,'Timestomping atime and mtime...')
+    print(status+'Timestomping atime and mtime...')
     sleep(1)
     os.utime(log.path, ns=(log.atime_ns, int(log.mtime_ns)))
-    print(success,'Success!')
+    print(success+'Success!')
 
 def get_fstype(log):
     #Determine mount point for log file
@@ -633,49 +784,49 @@ def get_fstype(log):
                     log.fstype = fstype
     #WTF is this branch
     else:
-        print(bad,'Not sure where to look, this must not be Linux or Solaris! You monster...')
+        print(bad+'Not sure where to look, this must not be Linux or Solaris! You monster...')
 
 def touchback_c(log):
     #Check if the fstype is ext
-    print(status,'Checking if ctime can be altered...')
+    print(status+'Checking if ctime can be altered...')
     sleep(1)
     if 'ext' in log.fstype and which('debugfs'):
-        print({success},'Log is stored on',log.fstype,'filesystem and debugfs is present, ctime can be changed!')
+        print({success}+'Log is stored on '+log.fstype+' filesystem and debugfs is present, ctime can be changed!')
         get_ctime(log)
         while True:
             proceed = input('\nDo you want to use the native debugfs binary to edit the inode table? (y/n) ')
             if proceed == 'y':
                 #Use debugfs to adjust ctime
-                print('\n',status,'Stomping ctime...')
+                print('\n'+status+'Stomping ctime...')
                 sleep(1)
                 command = "debugfs -w -R 'set_inode_field "+log.path+" ctime "+str(log.ctime)+"' "+log.fs
                 op = subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 if log.fstype == 'ext4':
-                    print(status,'Stomping ctime nanoseconds...')
+                    print(status+'Stomping ctime nanoseconds...')
                     sleep(1)
                     command2 = "debugfs -w -R 'set_inode_field "+log.path+" ctime_extra "+log.ctime_extra+"' "+log.fs
                     op2 = subprocess.Popen(command2, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 #Flush in-memory inode cache
-                print(status,'Flushing in-memory inode cache...')
+                print(status+'Flushing in-memory inode cache...')
                 sleep(1)
                 update = "sync; echo 2 > /proc/sys/vm/drop_caches"
                 op3 = subprocess.Popen(update, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                print(success,'All timestamps are stomped!')
+                print(success+'All timestamps are stomped!')
                 break
             elif proceed == 'n':
-                print('\n',bad,'ctime remains unchanged and will not match mtime, should be fine...')
+                print('\n'+bad+' ctime remains unchanged and will not match mtime, should be fine...')
                 break
             else:
                 print('\n',fail,'Invalid option entered!')
                 continue
     elif 'ext' in log.fstype and not which('debugfs'):
-        print(bad,'Log is stored on',log.fstype,'filesystem, but debugfs is not present, '
+        print(bad+'Log is stored on '+log.fstype+' filesystem, but debugfs is not present, '
             'ctime cannot be changed!')
     else:
-        print(bad,'Cannot change ctime on',log.fstype,'filesystem!')
+        print(bad+'Cannot change ctime on '+log.fstype+' filesystem!')
 
 def get_ctime(log):
     timezone = mktime(datetime.now().timetuple()) - mktime(datetime.utcnow().timetuple())
@@ -688,12 +839,16 @@ def main():
         logo()
         #Find logs based on OS and user input
         system_os = get_os()
-        btmp_path, wtmp_path, auth_log_path, syslog_path = get_log_paths(system_os)
-
-        btmp = UtmpFile(btmp_path)
-        wtmp = UtmpFile(wtmp_path)
-        auth = AsciiFile(auth_log_path)
-        syslog = AsciiFile(syslog_path)
+        if system_os == 'Linux':
+            btmp_path, wtmp_path, auth_log_path, syslog_path = get_linux_logs()
+            btmp = UtmpFile(btmp_path)
+            wtmp = UtmpFile(wtmp_path)
+            auth = AsciiFile(auth_log_path)
+            syslog = AsciiFile(syslog_path)
+        elif system_os == 'SunOS':
+            btmpx_path, wtmpx_path = get_sunos_logs()
+            btmpx = UtmpxFile(btmpx_path)
+            wtmpx = UtmpxFile(wtmpx_path)
 
     elif log_file != None:
         logo()
@@ -701,18 +856,22 @@ def main():
             text_log = AsciiFile(log_file)
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMP_FILES:
             binary_log = UtmpFile(log_file)
+        elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMPX_FILES:
+            binary_log = UtmpxFile(log_file)        
         elif get_file_type(log_file) == 'empty':
-            print(fail,log_file,'is empty! You\'re probably safe here...')
+            print(fail+log_file+' is empty! You\'re probably safe here...')
         else:
-            print(fail,'This is not a supported log file! Exiting...')
+            print(fail+'This is not a supported log file! Exiting...')
     else:
         parser.print_help()
-        
+
+    sleep(0.5)
+    print(status+'Closing TRACEERASE...')    
     exit()
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print('\n',status,'Exiting gracefully,whatever that means...')
+        print('\n'+status+'Interrupted! Closing TRACEERASE...')
         exit()
