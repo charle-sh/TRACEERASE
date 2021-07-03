@@ -1,12 +1,5 @@
 #!/usr/bin/python3
 
-import os, subprocess, argparse, hashlib, struct, random, platform, sys, curses, calendar
-from datetime import datetime, timedelta
-from time import sleep, mktime, strptime
-from shutil import copyfile, which
-from collections import namedtuple
-from getpass import getuser
-from pwd import getpwnam
 try:
     #Text styling
     from colorama import Fore, Style
@@ -19,6 +12,17 @@ except ImportError:
     status = '[*] '
     bad = '[-] '
     fail = '[!] '
+try:
+    import os, subprocess, argparse, hashlib, struct, random, platform, sys, curses, calendar
+    from datetime import datetime, timedelta
+    from time import sleep, mktime, strptime
+    from shutil import copyfile, which
+    from collections import namedtuple
+    from getpass import getuser
+    from pwd import getpwnam
+except (ImportError) as e:
+    print(fail+'[Error]: Import failure: '+str(e))
+    exit()
 
 #CLI arguments
 parser = argparse.ArgumentParser()
@@ -55,7 +59,7 @@ class Screen:
         self._log = log
         self._mode = 'select mode'
         self._message = ''
-        self._row = 0
+        self._row = len(self._log.lines) - 1
         self._col = 0
         self._scroll_top = 0 # the first line number in the window
         self._will_exit = False
@@ -635,13 +639,13 @@ class UtmpxFile:
                     self.clean_binary.append(line)
                 f.seek(self._size)
                 for entry in self._read(f.read()):
-                    line_ = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)
+                    line_ = entry.user+'    '+entry.line+'    '+entry.host+'    '+str(entry.time)+'    '+entry.type
                     self.clean_list.append(line_)
         with open(self.path, 'wb') as f:
             for line in self.clean_binary:
                 f.write(line)
         sleep(0.5)
-        print(success+self.path+' is cleaned')
+        print(success+self.path+' is cleaned!')
 
     def find_lastline(self):
         for uid in self.cleaned_users:
@@ -758,22 +762,17 @@ class SunLastLogFile:
         with open(self.path, 'rb+') as f:
             for uid in self._log.last_login:
                 if self._log.last_login[uid] != b'\x00' * SUN_LASTLOG_RECORD_SIZE:
-                    print(self._log.last_login[uid])
                     if len(self._log.last_login[uid].split()) == 6:
                         _, _, last_host, last_date, last_time, _ = self._log.last_login[uid].split()
                         last_term = 'ssh'
                     elif len(self._log.last_login[uid].split()) == 5:
                         _, last_term, last_date, last_time, _ = self._log.last_login[uid].split()
                         last_host = '\x00'
+                    if '.' in last_time: #remove ns time from last_time
+                        last_time, last_time_ns = last_time.split('.')
                     last_datetime = last_date+' '+last_time
                     pattern = '%Y-%m-%d %H:%M:%S'
                     epoch = int(mktime(strptime(last_datetime, pattern)))
-                    '''
-                    #looks like the wtmpx file keeps nanosecond timestamps for pts, check if in lastlog
-                    if '.' in last_time:
-                        last_time, last_time_ns = last_time.split('.')
-                        epoch = str(epoch+last_time_ns)
-                    '''
                     f.seek(uid * SUN_LASTLOG_RECORD_SIZE)
                     f.write(struct.pack(SUN_LASTLOG_STRUCT_WRITE, epoch, bytes(last_term, 'ascii'), bytes(last_host, 'ascii')))
                 else:
@@ -1117,17 +1116,20 @@ def main():
             wtmpx = UtmpxFile(wtmpx_path)
 
     elif log_file != None:
-        logo()
-        if os.path.isfile(log_file) and get_file_type(log_file) == 'ASCII':
+        if os.path.getsize(log_file) == 0 or get_file_type(log_file) == 'empty':
+            print(success+log_file+' is empty! You\'re probably safe here...')
+        elif os.path.isfile(log_file) and get_file_type(log_file) == 'ASCII':
+            logo()
             text_log = AsciiFile(log_file)
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMP_FILES:
+            logo()
             binary_log = UtmpFile(log_file)
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file in UTMPX_FILES:
+            logo()
             binary_log = UtmpxFile(log_file)
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'data' and log_file == LINUX_LASTLOG_FILE:
+            logo()
             binary_log = LinuxLastLogFile(log_file)        
-        elif get_file_type(log_file) == 'empty':
-            print(fail+log_file+' is empty! You\'re probably safe here...')
         else:
             print(fail+'This is not a supported log file! Exiting...')
     else:
