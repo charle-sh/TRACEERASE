@@ -98,6 +98,10 @@ class Screen:
             self._row -= height - 1
         elif ch == curses.KEY_NPAGE: #page down
             self._row += height - 1
+        elif ch == curses.KEY_HOME: #home
+            self._row = 0
+        elif ch == curses.KEY_END: #end
+            self._row = len(self._log.lines) - 1
         elif ch in [10]: #save selections and exit
             self._mode = 'Save selections? (y/n)'
         elif ch in [32]: #(un)select dirty line
