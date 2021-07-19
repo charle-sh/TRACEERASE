@@ -26,9 +26,12 @@ except (ImportError) as e:
 
 #CLI arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('-a', '--auto', action='store_true', help=
-    'Run the full script, automatically checking all logs that have changed since given timeframe'
-    '. NOT YET FULLY IMPLEMENTED.')
+parser.add_argument('-d', '--discover', help=
+    'Systematially check for all logs that have changed since specified timeframe (in minutes). '
+    'Will search common log locations and open file descriptors based on process names.')
+parser.add_argument('-p', '--process', nargs='+', help=
+    'Check specified process\'s file descriptors for possible logging locations. Must be used in '
+    'combination with time specified with -d.')
 parser.add_argument('-f', '--file', help=
     'Skip the automated log steps and clean specified log only.')
 args = parser.parse_args()
@@ -40,8 +43,8 @@ LINUX_LASTLOG_STRUCT = struct.Struct('=l32s256s') #linux lastlog struct
 LINUX_LASTLOG_STRUCT_WRITE = '=l32s256s'
 SUN_LASTLOG_STRUCT = struct.Struct('=l8s16s') #sunos lastlog struct
 SUN_LASTLOG_STRUCT_WRITE = '=l8s16s'
-UTMP_FILES = ['/var/log/btmp','/var/log/wtmp']
-UTMPX_FILES = ['/var/share/adm/wtmpx','/var/share/adm/btmpx']
+UTMP_FILES = ['/var/log/btmp','/var/log/wtmp','/var/run/utmp']
+UTMPX_FILES = ['/var/share/adm/wtmpx','/var/share/adm/btmpx','/var/run/utmpx']
 LINUX_LASTLOG_FILE = '/var/log/lastlog'
 SUN_LASTLOG_FILE = '/var/share/adm/lastlog'
 BLOCKSIZE = 65536
@@ -50,7 +53,23 @@ LINUX_LASTLOG_RECORD_SIZE = 292
 SUN_LASTLOG_RECORD_SIZE = 28
 
 #Global variables
-auto = args.auto
+try:
+    discover = args.discover
+    if discover != None and int(discover) < 1: #make sure value is positive
+        print(fail+'Value must be a positive integer!\n')
+        parser.print_help()
+        exit()
+    process = args.process
+    if process != None: #make sure value is positive
+        for proc in process:
+            if int(proc) < 1:
+                print(fail+'Value must be a positive integer!\n')
+                parser.print_help()
+                exit()
+except ValueError:
+    print(fail+'Value must be a positive integer!\n')
+    parser.print_help()
+    exit()
 log_file = args.file
 
 class Screen:
@@ -935,66 +954,139 @@ def get_os():
             continue
     return system_os
 
-def get_linux_logs():
-    print(status+'Discovering logs...')
+def logcheck(*process):
     not_logs = ['/proc/sys/kernel/hostname','/proc/kmsg']
     log_processes = ['syslogd','rsyslogd','systemd-journal','auditd']
-    pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+    if process == ():
+        pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+    else:
+        pids = process
+    varlog = []
+    varshareadm = []
     log_files = {}
 
-    for log in UTMP_FILES:
-        if os.path.getsize(log) == 0:
-            log_files[log] = 'empty'
-        elif os.path.isfile(log) and get_file_type(log) == 'data':
+    '''
+    I am strongly considering spliting these up and doing the platform.system() conditional to 
+    call different functions.
+    '''
+    if platform.system() == 'Linux':
+        #Check processes on Linux
+        for pid in pids:
+            comm = '/proc/'+pid+'/comm'
+            fd = '/proc/'+pid+'/fd/'
+            try:
+                with open(comm, 'r') as f:
+                    process = f.read().rstrip()
+                    if process in log_processes:
+                        proc_dir = os.listdir(fd)
+                        for link in proc_dir:
+                            file = os.readlink(fd+link)
+                            if os.path.isfile(file) and file not in not_logs and os.path.getsize(file) != 0:
+                                log_files[file] = process
+            except IOError: # proc has already terminated
+                continue
+    elif platform.system() == 'SunOS':
+        #Check processes on Solaris
+        varlog_list = ['/var/log/'+file for file in os.listdir('/var/log/')]
+        varadm_list = ['/var/adm/'+file for file in os.listdir('/var/adm/')]
+        varshareadm_list = ['/var/share/adm/'+file for file in os.listdir('/var/share/adm/')]
+        varshareaudit_list = ['/var/share/audit/'+file for file in os.listdir('/var/share/audit/')]
+        all_logs_list = varlog_list + varadm_list + varshareadm_list + varshareaudit_list
+
+        for pid in pids:
+            comm = '/proc/'+pid+'/execname'
+            fd = '/proc/'+pid+'/fd/'
+            try:
+                with open(comm, 'r') as f:
+                    process = f.read().split('/')[-1].rstrip('\x00')
+                    if process in log_processes:
+                        proc_dir = os.listdir(fd)
+                        for num in proc_dir:
+                            file_desc = fd+num
+                            for n, file in enumerate(all_logs_list):
+                                if os.stat(file_desc).st_ino == os.stat(file).st_ino:
+                                    log_files[file] = process
+                                    break
+                                elif n == len(all_logs_list) - 1 and get_file_type(file_desc) != 'not_log':
+                                    log_files[file_desc] = process
+            except IOError as e: # proc has already terminated
+                print(e)
+                continue
+
+    if process == ():
+        logcheck_filesys(log_files)
+    else:
+        get_changed_logs(log_files)
+
+def logcheck_filesys(log_files):
+    #Check dirs
+    try:
+        varlog = ['/var/log/'+file for file in os.listdir('/var/log') if '/var/log/'+file not in log_files]
+        varlog.append('/var/run/utmp')
+        varshareadm = ['/var/share/adm/'+file for file in os.listdir('/var/share/adm/') if '/var/share/adm/'+file not in log_files]
+        varshareadm.append('/var/run/utmpx')
+    except FileNotFoundError: #For locations that only exist on Solaris
+        pass
+    all_logs = varlog + varshareadm
+    for log in all_logs:
+        if os.path.isfile(log) and get_file_type(log) == 'data' and log in UTMP_FILES:
             log_files[log] = 'utmp'
+        elif os.path.isfile(log) and get_file_type(log) == 'data' and log in UTMPX_FILES:
+            log_files[log] = 'utmpx'
+        elif os.path.isfile(log) and get_file_type(log) == 'ASCII':
+            log_files[log] = 'ascii'
 
-    for pid in pids:
-        comm = '/proc/'+pid+'/comm'
-        fd = '/proc/'+pid+'/fd/'
-        try:
-            with open(comm, 'r') as f:
-                process = f.read().rstrip()
-                if process in log_processes:
-                    proc_dir = os.listdir(fd)
-                    for link in proc_dir:
-                        file = os.readlink(fd+link)
-                        if os.path.isfile(file) and file not in not_logs and os.path.getsize(file) != 0:
-                            log_files[file] = process
-        except IOError: # proc has already terminated
-            continue
+    get_changed_logs(log_files)
 
-    if os.path.getsize(LINUX_LASTLOG_FILE) == 0:
-        log_files[LINUX_LASTLOG_FILE] = 'empty'
-    sleep(2)
-    print(success+str(len(log_files))+' logs discovered!')
-    sleep(1)
-    return log_files
+def get_changed_logs(log_files):
+    changed_logs = 0 #to keep track if any logs changed
+    cleanable_logs = ['syslogd','rsyslogd','utmp','utmpx','ascii'] #log types we can clean
+    #Check if logs changed
+    for log in log_files:
+        mtime = os.path.getmtime(log)
+        last_modified_date = datetime.fromtimestamp(mtime)
+        difference = datetime.now() - last_modified_date
+        if timedelta(minutes=0) <= difference <= timedelta(minutes=int(discover)):
+            if log_files[log] in cleanable_logs and log.split('/')[1] != 'proc':
+                print(bad+log+' has changed in last '+discover+' minutes')
+                changed_logs += 1
+            elif log_files[log] in cleanable_logs and log.split('/')[1] == 'proc':
+                print(bad+log+' is a '+log_files[log]+' '+get_file_type(log)+' file and has changed in last '+discover+' minutes')
+                changed_logs += 1
+            elif log_files[log] not in cleanable_logs and log.split('/')[1] == 'proc':
+                print(fail+log+' is a '+log_files[log]+' '+get_file_type(log)+' file and has changed in last '+discover+' minutes but can\'t be cleaned!')
+                changed_logs += 1
+            else:
+                print(fail+log+' has changed in last '+discover+' minutes but can\'t be cleaned!')
+                changed_logs += 1
 
-def get_sunos_logs():
-    btmpx_path = '/var/share/adm/btmpx'
-    wtmpx_path = '/var/share/adm/wtmpx'
-    if os.path.isfile(btmpx_path):
-        btmpx_path = '/var/share/adm/btmpx'
-    else:
-        print('that did not go well')
-    if os.path.isfile(wtmpx_path):
-        wtmpx_path = '/var/share/adm/wtmpx'
-    else:
-        print('that did not go well')
+    #Say if logs haven't changed
+    if changed_logs == 0:
+        print(success+'No logs have changed in the last '+discover+' minutes.')
 
+'''
+Couldn't figure out a way to not use the 'file' binary to find file types, might revist in the 
+future...
+'''
 def get_file_type(path):
     op = subprocess.Popen(['file', path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, _ = op.communicate()
+    stdout = stdout.decode().split()
 
-    if 'ASCII' in str(stdout):
+    if 'ASCII' in stdout:
         return 'ASCII'
-    elif 'data' or 'dBase' in str(stdout):
+    elif 'ascii' in stdout:
+        return 'ASCII'
+    elif 'data' in stdout:
         return 'data'
-    elif 'empty' in str(stdout):
+    elif 'dBase' in stdout:
+        return 'data'
+    elif 'empty' in stdout:
         return 'empty'
+    elif 'Solaris' in stdout and 'Audit' in stdout:
+        return 'Solaris Audit'
     else:
-        print(fail+'Cannot clean this file!')
-        return
+        return 'not_log'
 
 def get_hash(path, block_size):
     #Get file hash
@@ -1007,11 +1099,12 @@ def get_hash(path, block_size):
     return hasher.hexdigest()
 
 def wiper(log):
-        print(status+'/dev/null\'ing '+log+'...')
-        sleep(1)
-        command = 'cat /dev/null > '+log
-        dev_null = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(success+log+' is cleaned')
+    #cat /dev/null into file if you're wiping all lines
+    print(status+'/dev/null\'ing '+log+'...')
+    sleep(1)
+    command = 'cat /dev/null > '+log
+    dev_null = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(success+log+' is cleaned')
 
 def touchback_am(log):
     #Gotta find latest remaining entry to the log to change the mtime back to that point
@@ -1097,30 +1190,24 @@ def main():
     if getuser() != 'root':
         print(fail+'Script must be run as root!')
         exit()
-    if auto:
-        logo()
-        #Find logs based on OS and user input
-        system_os = get_os()
-        if system_os == 'Linux':
-            log_files = get_linux_logs()
-            for key in log_files:
-                if log_files[key] == 'empty':
-                    print(success+key+' is empty!')
-                    sleep(1.5)
-                elif log_files[key] == 'utmp':
-                    key = UtmpFile(key)
-                elif log_files[key] == 'rsyslogd' or log_files[key] == 'syslogd':
-                    key = AsciiFile(key)
-                else:
-                    print(fail+'Cannot clean '+key)
-                    sleep(1.5)
-        elif system_os == 'SunOS':
-            btmpx_path, wtmpx_path = get_sunos_logs()
-            btmpx = UtmpxFile(btmpx_path)
-            wtmpx = UtmpxFile(wtmpx_path)
+
+    elif discover != None and process == None:
+        logcheck()
+        exit()
+
+    elif discover != None and process != None:
+        logcheck(*process)
+        exit()
+
+    elif discover == None and process != None:
+        parser.print_help()
+        exit()
 
     elif log_file != None:
-        if os.path.getsize(log_file) == 0 or get_file_type(log_file) == 'empty':
+        if os.path.isfile(log_file) == False:
+            print(fail+'File does not exist!')
+            exit()
+        elif os.path.getsize(log_file) == 0 or get_file_type(log_file) == 'empty':
             print(success+log_file+' is empty! You\'re probably safe here...')
         elif os.path.isfile(log_file) and get_file_type(log_file) == 'ASCII':
             logo()
@@ -1138,14 +1225,13 @@ def main():
             print(fail+'This is not a supported log file! Exiting...')
     else:
         parser.print_help()
-
     sleep(0.5)
-    print(status+'Closing TRACEERASE...')    
+    print(status+'Closing TRACEERASE...') 
     exit()
 
 if __name__ == '__main__':
     try:
         main()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt: #handle keyboard interrupts
         print('\n'+bad+'Interrupted! Closing TRACEERASE...')
         exit()
